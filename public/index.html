@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Đấu Trường Party</title>
+    <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;700;900&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+    <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js"></script>
+    <link rel="stylesheet" href="style.css">
+    <script src="/socket.io/socket.io.js"></script>
+</head>
+<body>
+
+    <div class="background-anim"></div>
+
+    <div id="login-screen" class="screen flex-center">
+        <div class="card glass">
+            <h1 class="game-title">TẾT<br><span>PARTY GAME</span></h1>
+            <input type="text" id="room-input" placeholder="Nhập Mã Phòng (VD: 123)" autocomplete="off">
+            <div id="action-buttons" class="tabs">
+                <button onclick="showJoinForm()" class="btn btn-join" style="margin-bottom: 20px;">THAM GIA NGAY</button>
+                <button onclick="createRoom()" class="btn btn-host">TẠO PHÒNG (HOST)</button>
+            </div>
+            <div id="join-form" class="hidden fade-in">
+                <input type="text" id="name-input" placeholder="Tên của bạn là gì?" autocomplete="off">
+                <button onclick="joinRoom()" class="btn btn-go">VÀO CHƠI 🚀</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="host-screen" class="screen hidden">
+        <div class="top-bar">
+            <div class="room-badge">PHÒNG: <span id="host-room-code">...</span></div>
+            <div class="controls"><button onclick="toggleSettings()" class="btn-icon">⚙️ Cài đặt</button></div>
+        </div>
+        <div class="main-layout">
+            <div class="left-panel">
+                <div class="wheel-wrapper">
+                    <canvas id="wheelCanvas" width="500" height="500"></canvas>
+                    <div class="wheel-pointer">▼</div>
+                    <div class="wheel-base"></div>
+                </div>
+                <button id="btn-spin" onclick="hostSpin()" class="btn btn-giant pulse">QUAY NGAY! 🎲</button>
+                <div id="winner-name" class="glow-text">...</div>
+            </div>
+            <div class="right-panel">
+                <div id="host-question-area" class="question-card hidden">
+                    <div class="timer-badge" id="timer-display">15</div>
+                    <h2 id="host-q-text">Đang tải...</h2>
+                    <div id="host-answers" class="answers-grid-host"></div>
+                </div>
+                <div class="player-list-container glass">
+                    <h3>Bảng Xếp Hạng</h3>
+                    <div id="player-list" class="scroll-list"></div>
+                </div>
+            </div>
+        </div>
+        <div id="settings-modal" class="modal hidden">
+            <div class="modal-content glass">
+                <h3>Nạp Bộ Câu Hỏi</h3>
+                <textarea id="q-input" rows="10" placeholder="Copy paste câu hỏi vào đây..."></textarea>
+                <div class="modal-actions">
+                    <button onclick="loadQuestions()" class="btn btn-confirm">Lưu Dữ Liệu</button>
+                    <button onclick="toggleSettings()" class="btn btn-cancel">Đóng</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="player-screen" class="screen hidden mobile-layout">
+        <div class="mobile-header glass">
+            <div class="user-profile">
+                <div class="avatar">👤</div>
+                <div class="user-details"><span id="p-name" class="u-name">Player</span><span class="u-score">Điểm: <span id="p-score">0</span></span></div>
+            </div>
+            <button class="btn-tiny" onclick="togglePlayerList()">🏆 BXH</button>
+        </div>
+        <div id="powerup-bar" class="powerup-bar hidden"></div>
+        <div class="mobile-body">
+            <div id="status-msg" class="status-card glass">Đang chờ Host quay số...</div>
+            <div id="interaction-area" class="hidden fade-in">
+                <div class="timer-bar"><div id="p-timer-bar-fill"></div></div>
+                <div class="q-card glass"><span class="q-label">CÂU HỎI:</span><p id="p-question-text">...</p></div>
+                <div class="options-grid">
+                    <button onclick="submitAnswer(0)" class="btn-opt">A</button>
+                    <button onclick="submitAnswer(1)" class="btn-opt">B</button>
+                    <button onclick="submitAnswer(2)" class="btn-opt">C</button>
+                    <button onclick="submitAnswer(3)" class="btn-opt">D</button>
+                </div>
+            </div>
+            <button id="btn-steal" class="hidden btn-steal-glitch" onclick="requestSteal()">⚡ CƯỚP LƯỢT NGAY! ⚡</button>
+        </div>
+        <div id="powerup-modal" class="modal hidden">
+            <div class="modal-content glass"><h3>🎁 PHẦN THƯỞNG 🎁</h3><p>Chọn 1 quyền trợ giúp:</p><div id="powerup-options" class="powerup-grid"></div></div>
+        </div>
+        <div id="player-leaderboard-modal" class="modal hidden">
+            <div class="modal-content glass"><h3>Bảng Xếp Hạng</h3><div id="leaderboard-content" class="list-container"></div><button onclick="togglePlayerList()" class="btn btn-cancel full-width">Đóng</button></div>
+        </div>
+    </div>
+    <script src="script.js"></script>
+</body>
+</html>
