@@ -3,6 +3,8 @@ const app = express();
 const http = require('http').createServer(app);
 const io = require('socket.io')(http);
 
+console.log("--- SERVER DANG KHOI DONG ---");
+
 app.use(express.static('public'));
 
 // --- CẤU HÌNH ---
@@ -24,33 +26,27 @@ const DEFAULT_QUESTIONS = [
 
 let rooms = {};
 
-// --- HÀM ĐỒNG BỘ TRẠNG THÁI (QUAN TRỌNG NHẤT) ---
-// Hàm này giúp người chơi/Host khi vào lại sẽ nhìn thấy đúng màn hình đang diễn ra
+// --- HÀM ĐỒNG BỘ TRẠNG THÁI (FIX LỖI MÀN HÌNH ĐEN) ---
 function syncGameState(socket, room, isHost) {
-    // 1. Gửi lại danh sách người chơi & điểm số mới nhất
     const activePlayers = room.players.filter(p => !p.disconnected);
     socket.emit('update_players', activePlayers);
     socket.emit('update_scores', activePlayers);
 
-    // 2. Nếu là Host và đang ở sảnh chờ -> Mở khóa nút bấm
     if (isHost && room.state === 'WAITING' && !room.isGivingPowerup) {
         socket.emit('lock_spin_btn', { locked: false });
         socket.emit('ready_next_spin');
     }
 
-    // 3. Nếu đang trong trận (Quay số, Trả lời, Cướp) -> Ép màn hình chuyển cảnh
     if (room.state === 'ANSWERING' || room.state === 'STEALING') {
         const realIndex = room.currentQIndex % room.questions.length;
         const q = room.questions[realIndex];
         
-        // Tính thời gian còn lại thực tế
         let remaining = 0;
         if(room.timerStart && room.timerDuration) {
             const elapsed = (Date.now() - room.timerStart) / 1000;
             remaining = Math.max(0, room.timerDuration - elapsed);
         }
 
-        // Gửi lại câu hỏi để Client hiện màn hình câu hỏi
         socket.emit('new_question', { 
             question: q.text, 
             options: q.answers, 
@@ -58,18 +54,18 @@ function syncGameState(socket, room, isHost) {
             turnPlayerId: room.turnPlayer 
         });
 
-        // Nếu là pha cướp, gửi thêm thông tin cướp
         if (room.state === 'STEALING') {
-            const stealerName = room.stealer ? room.players.find(p=>p.id===room.stealer)?.name : null;
+            let stealerName = null;
+            const s = room.players.find(p => p.id === room.stealer);
+            if (s) stealerName = s.name;
+
             if(stealerName) socket.emit('steal_locked', { stealerName });
-            else socket.emit('start_steal_phase', { duration: remaining, failedPlayerId: room.turnPlayer }); // Hiện nút cướp
+            else socket.emit('start_steal_phase', { duration: remaining, failedPlayerId: room.turnPlayer });
         }
     }
 }
 
-
 // --- CÁC HÀM HỖ TRỢ GAME ---
-
 function startRoomTimer(room, duration, cb) {
     if (room.timer) clearTimeout(room.timer);
     room.timerDuration = duration;
@@ -216,26 +212,24 @@ function handleAnswer(roomCode, answerIndex, isSteal, playerId) {
 }
 
 // --- SOCKET MAIN ---
-
 io.on('connection', (socket) => {
     console.log('User connected:', socket.id);
 
-    // 1. TẠO PHÒNG & HOST RECONNECT
     socket.on('create_room', (roomCode) => {
         if (!roomCode) return;
         
         if (rooms[roomCode]) {
             const room = rooms[roomCode];
             if (room.hostDisconnected) {
-                console.log(`♻️ HOST đã quay lại phòng ${roomCode}`);
+                console.log(`HOST RECONNECT: ${roomCode}`);
                 if (room.hostDisconnectTimer) clearTimeout(room.hostDisconnectTimer);
                 
                 room.host = socket.id;
                 room.hostDisconnected = false;
                 socket.join(roomCode);
                 
-                socket.emit('room_created', roomCode); // Vào giao diện Host
-                syncGameState(socket, room, true); // ĐỒNG BỘ NGAY LẬP TỨC
+                socket.emit('room_created', roomCode);
+                syncGameState(socket, room, true);
                 return;
             } else {
                 return socket.emit('error_msg', `Phòng ${roomCode} đang có chủ!`);
@@ -264,7 +258,6 @@ io.on('connection', (socket) => {
         socket.emit('room_created', roomCode);
     });
 
-    // 2. PLAYER JOIN & RECONNECT
     socket.on('check_room', (roomCode) => {
         if (rooms[roomCode]) socket.emit('room_valid');
         else socket.emit('error_msg', 'Phòng không tồn tại!');
@@ -273,12 +266,11 @@ io.on('connection', (socket) => {
     socket.on('join_room', ({ roomCode, name }) => {
         const room = rooms[roomCode];
         if (room) {
-            // So sánh tên không phân biệt hoa thường để dễ tìm
             const cleanName = name.trim();
             let existingPlayer = room.players.find(p => p.name.trim().toLowerCase() === cleanName.toLowerCase());
 
             if (existingPlayer) {
-                console.log(`♻️ PLAYER ${name} đã quay lại phòng ${roomCode}`);
+                console.log(`PLAYER RECONNECT: ${name}`);
                 existingPlayer.id = socket.id; 
                 existingPlayer.disconnected = false; 
                 
@@ -290,10 +282,7 @@ io.on('connection', (socket) => {
                 socket.join(roomCode);
                 socket.emit('join_success', { name: existingPlayer.name, score: existingPlayer.score });
                 socket.emit('update_powerup', existingPlayer.powerups);
-                
-                // ĐỒNG BỘ NGAY LẬP TỨC
                 syncGameState(socket, room, false);
-
             } else {
                 room.players.push({ id: socket.id, name, score: 0, powerups: [], disconnected: false });
                 socket.join(roomCode);
@@ -303,7 +292,6 @@ io.on('connection', (socket) => {
         }
     });
 
-    // 3. LOGIC GAME
     socket.on('spin_wheel', (roomCode) => {
         const room = rooms[roomCode];
         if (!room || room.state !== 'WAITING' || room.isGivingPowerup) return;
@@ -365,7 +353,8 @@ io.on('connection', (socket) => {
         
         const realIndex = room.currentQIndex % room.questions.length;
         const q = room.questions[realIndex];
-        const stealerName = room.players.find(p => p.id === socket.id).name;
+        const s = room.players.find(p => p.id === socket.id);
+        const stealerName = s ? s.name : "Ai đó";
 
         if (room.transferEffects && Object.keys(room.transferEffects).length > 0) {
             const stealP = room.activeEffects[socket.id] || {};
@@ -479,4 +468,12 @@ io.on('connection', (socket) => {
                         const idx = room.players.indexOf(player);
                         if (idx !== -1) room.players.splice(idx, 1);
                         io.to(room.host).emit('update_players', room.players.filter(p => !p.disconnected));
-       
+                    }
+                }, 60000);
+            }
+        }
+    });
+});
+
+const PORT = process.env.PORT || 3000;
+http.listen(PORT, () => console.log(`Server running on port ${PORT}`));
