@@ -24,7 +24,51 @@ const DEFAULT_QUESTIONS = [
 
 let rooms = {};
 
-// --- CÁC HÀM HỖ TRỢ (ĐỂ NGOÀI CHO GỌN) ---
+// --- HÀM ĐỒNG BỘ TRẠNG THÁI (QUAN TRỌNG NHẤT) ---
+// Hàm này giúp người chơi/Host khi vào lại sẽ nhìn thấy đúng màn hình đang diễn ra
+function syncGameState(socket, room, isHost) {
+    // 1. Gửi lại danh sách người chơi & điểm số mới nhất
+    const activePlayers = room.players.filter(p => !p.disconnected);
+    socket.emit('update_players', activePlayers);
+    socket.emit('update_scores', activePlayers);
+
+    // 2. Nếu là Host và đang ở sảnh chờ -> Mở khóa nút bấm
+    if (isHost && room.state === 'WAITING' && !room.isGivingPowerup) {
+        socket.emit('lock_spin_btn', { locked: false });
+        socket.emit('ready_next_spin');
+    }
+
+    // 3. Nếu đang trong trận (Quay số, Trả lời, Cướp) -> Ép màn hình chuyển cảnh
+    if (room.state === 'ANSWERING' || room.state === 'STEALING') {
+        const realIndex = room.currentQIndex % room.questions.length;
+        const q = room.questions[realIndex];
+        
+        // Tính thời gian còn lại thực tế
+        let remaining = 0;
+        if(room.timerStart && room.timerDuration) {
+            const elapsed = (Date.now() - room.timerStart) / 1000;
+            remaining = Math.max(0, room.timerDuration - elapsed);
+        }
+
+        // Gửi lại câu hỏi để Client hiện màn hình câu hỏi
+        socket.emit('new_question', { 
+            question: q.text, 
+            options: q.answers, 
+            duration: remaining, 
+            turnPlayerId: room.turnPlayer 
+        });
+
+        // Nếu là pha cướp, gửi thêm thông tin cướp
+        if (room.state === 'STEALING') {
+            const stealerName = room.stealer ? room.players.find(p=>p.id===room.stealer)?.name : null;
+            if(stealerName) socket.emit('steal_locked', { stealerName });
+            else socket.emit('start_steal_phase', { duration: remaining, failedPlayerId: room.turnPlayer }); // Hiện nút cướp
+        }
+    }
+}
+
+
+// --- CÁC HÀM HỖ TRỢ GAME ---
 
 function startRoomTimer(room, duration, cb) {
     if (room.timer) clearTimeout(room.timer);
@@ -73,10 +117,8 @@ function endTurn(roomCode) {
     room.transferEffects = {};
     room.processingResult = false; 
     
-    // Gửi điểm số mới nhất
     io.to(roomCode).emit('update_scores', room.players.filter(p => !p.disconnected));
 
-    // Logic chuyển vòng
     if (room.currentQIndex > 0 && room.currentQIndex % 5 === 0) {
         startPowerupPhase(room, roomCode);
     } else if (room.currentQIndex > 0 && room.currentQIndex % 3 === 0) {
@@ -105,7 +147,6 @@ function startPowerupPhase(room, roomCode) {
 
     if (room.timer) clearTimeout(room.timer);
     room.timer = setTimeout(() => {
-        // Tự động chọn cái đầu tiên nếu hết giờ
         room.players.forEach(p => {
             if (room.powerupOptions[p.id]) {
                 const item = room.powerupOptions[p.id][0];
@@ -140,7 +181,6 @@ function handleAnswer(roomCode, answerIndex, isSteal, playerId) {
     const x2Count = effects['x2'] || 0;
     const hasShield = effects['shield'] || false;
 
-    // Feedback riêng cho người trả lời
     io.to(playerId).emit('show_answer_feedback', {
         submittedIndex: answerIndex, correctIndex: q.correct, isCorrect, playerId: playerId, isStealTurn: isSteal
     });
@@ -151,7 +191,6 @@ function handleAnswer(roomCode, answerIndex, isSteal, playerId) {
             if (x2Count > 0) {
                 points = isSteal ? (30 * Math.pow(2, x2Count - 1)) : (20 * Math.pow(2, x2Count - 1));
             }
-            
             p.score += points;
             io.to(roomCode).emit('answer_result', { correct: true, msg: `${p.name} +${points} điểm!` });
             endTurn(roomCode);
@@ -165,7 +204,6 @@ function handleAnswer(roomCode, answerIndex, isSteal, playerId) {
                     penalty = 0;
                     msg = `SAI RỒI! Nhưng được KHIÊN bảo vệ (-0 điểm)`;
                 }
-                
                 p.score -= penalty;
                 io.to(roomCode).emit('reveal_correct_answer', { correctIndex: q.correct });
                 io.to(roomCode).emit('answer_result', { correct: false, msg: msg });
@@ -177,7 +215,7 @@ function handleAnswer(roomCode, answerIndex, isSteal, playerId) {
     }, 2000);
 }
 
-// --- SOCKET LOGIC CHÍNH ---
+// --- SOCKET MAIN ---
 
 io.on('connection', (socket) => {
     console.log('User connected:', socket.id);
@@ -188,16 +226,16 @@ io.on('connection', (socket) => {
         
         if (rooms[roomCode]) {
             const room = rooms[roomCode];
-            // Nếu phòng đang mất Host -> Cho phép cướp lại quyền Host
             if (room.hostDisconnected) {
-                console.log(`♻️ Khôi phục quyền Host cho phòng ${roomCode}`);
+                console.log(`♻️ HOST đã quay lại phòng ${roomCode}`);
                 if (room.hostDisconnectTimer) clearTimeout(room.hostDisconnectTimer);
                 
                 room.host = socket.id;
                 room.hostDisconnected = false;
                 socket.join(roomCode);
-                socket.emit('room_created', roomCode);
-                socket.emit('update_players', room.players.filter(p => !p.disconnected));
+                
+                socket.emit('room_created', roomCode); // Vào giao diện Host
+                syncGameState(socket, room, true); // ĐỒNG BỘ NGAY LẬP TỨC
                 return;
             } else {
                 return socket.emit('error_msg', `Phòng ${roomCode} đang có chủ!`);
@@ -226,7 +264,7 @@ io.on('connection', (socket) => {
         socket.emit('room_created', roomCode);
     });
 
-    // 2. CHECK & JOIN & PLAYER RECONNECT
+    // 2. PLAYER JOIN & RECONNECT
     socket.on('check_room', (roomCode) => {
         if (rooms[roomCode]) socket.emit('room_valid');
         else socket.emit('error_msg', 'Phòng không tồn tại!');
@@ -235,11 +273,12 @@ io.on('connection', (socket) => {
     socket.on('join_room', ({ roomCode, name }) => {
         const room = rooms[roomCode];
         if (room) {
-            let existingPlayer = room.players.find(p => p.name === name);
+            // So sánh tên không phân biệt hoa thường để dễ tìm
+            const cleanName = name.trim();
+            let existingPlayer = room.players.find(p => p.name.trim().toLowerCase() === cleanName.toLowerCase());
 
             if (existingPlayer) {
-                // --- RECONNECT ---
-                console.log(`♻️ ${name} đã quay lại phòng ${roomCode}`);
+                console.log(`♻️ PLAYER ${name} đã quay lại phòng ${roomCode}`);
                 existingPlayer.id = socket.id; 
                 existingPlayer.disconnected = false; 
                 
@@ -249,32 +288,18 @@ io.on('connection', (socket) => {
                 }
 
                 socket.join(roomCode);
-                socket.emit('join_success', { name, score: existingPlayer.score });
+                socket.emit('join_success', { name: existingPlayer.name, score: existingPlayer.score });
                 socket.emit('update_powerup', existingPlayer.powerups);
                 
-                // Gửi lại trạng thái trận đấu nếu đang chơi dở
-                if (room.state === 'ANSWERING' || room.state === 'STEALING') {
-                     const realIndex = room.currentQIndex % room.questions.length;
-                     const q = room.questions[realIndex];
-                     let remaining = 0;
-                     if(room.timerStart && room.timerDuration) {
-                        const elapsed = (Date.now() - room.timerStart) / 1000;
-                        remaining = Math.max(0, room.timerDuration - elapsed);
-                     }
-                     socket.emit('new_question', { 
-                        question: q.text, options: q.answers, duration: remaining, turnPlayerId: room.turnPlayer 
-                    });
-                    if(room.state === 'STEALING' && room.stealer === socket.id) {
-                         socket.emit('allow_steal_answer', { duration: remaining, question: q.text, options: q.answers });
-                    }
-                }
+                // ĐỒNG BỘ NGAY LẬP TỨC
+                syncGameState(socket, room, false);
+
             } else {
-                // --- NEW PLAYER ---
                 room.players.push({ id: socket.id, name, score: 0, powerups: [], disconnected: false });
                 socket.join(roomCode);
                 socket.emit('join_success', { name, score: 0 });
+                io.to(room.host).emit('update_players', room.players.filter(p => !p.disconnected));
             }
-            io.to(room.host).emit('update_players', room.players.filter(p => !p.disconnected));
         }
     });
 
@@ -297,13 +322,11 @@ io.on('connection', (socket) => {
         const room = rooms[roomCode];
         if (!room) return;
         
-        // Check hết hạn item
         room.players.forEach(p => {
             const oldLen = p.powerups.length;
             p.powerups = p.powerups.filter(item => room.currentQIndex <= item.expireRound);
             if (p.powerups.length < oldLen) {
                 io.to(p.id).emit('update_powerup', p.powerups);
-                io.to(p.id).emit('notification', { type: 'info', msg: 'Vật phẩm đã hết hạn!' });
             }
         });
 
@@ -344,7 +367,6 @@ io.on('connection', (socket) => {
         const q = room.questions[realIndex];
         const stealerName = room.players.find(p => p.id === socket.id).name;
 
-        // Xử lý hiệu ứng rớt lại từ người trước
         if (room.transferEffects && Object.keys(room.transferEffects).length > 0) {
             const stealP = room.activeEffects[socket.id] || {};
             if (room.transferEffects['x2']) {
@@ -366,57 +388,44 @@ io.on('connection', (socket) => {
         });
     });
 
-    // 4. POWERUP & DATA
     socket.on('activate_powerup', ({ roomCode, index }) => {
         const room = rooms[roomCode];
         if(!room || room.processingResult) return;
-
         const p = room.players.find(x => x.id === socket.id);
         if(!p || !p.powerups[index]) return;
-
+        
         const item = p.powerups[index];
         const type = item.type;
         const isMyTurn = (room.state === 'ANSWERING' && socket.id === room.turnPlayer) || 
                          (room.state === 'STEALING' && socket.id === room.stealer);
         let success = false;
-
-        if (type === 'bandit') {
-            if ((room.state === 'ANSWERING' || room.state === 'STEALING') && !isMyTurn) {
-                // BANDIT LOGIC
-                if (room.timer) clearTimeout(room.timer);
-                const victimId = room.turnPlayer;
-                if (room.activeEffects[victimId] && room.activeEffects[victimId]['x2']) {
-                    if (!room.activeEffects[p.id]) room.activeEffects[p.id] = {};
-                    room.activeEffects[p.id]['x2'] = (room.activeEffects[p.id]['x2'] || 0) + room.activeEffects[victimId]['x2'];
-                    delete room.activeEffects[victimId];
-                }
-                room.state = 'STEALING'; room.stealer = p.id; room.processingResult = false; 
-                io.to(roomCode).emit('steal_locked', { stealerName: p.name + " (TƯỚNG CƯỚP)" });
-                const realIndex = room.currentQIndex % room.questions.length;
-                const q = room.questions[realIndex];
-                io.to(p.id).emit('allow_steal_answer', { duration: 5, question: q.text, options: q.answers });
-                startRoomTimer(room, 5, () => {
-                     p.score -= 5;
-                     io.to(roomCode).emit('answer_result', { correct: false, msg: `Cướp thất bại!` });
-                     endTurn(roomCode);
-                });
-                success = true;
+        
+        if (type === 'bandit' && (room.state === 'ANSWERING' || room.state === 'STEALING') && !isMyTurn) {
+            if (room.timer) clearTimeout(room.timer);
+            const victimId = room.turnPlayer;
+            if (room.activeEffects[victimId] && room.activeEffects[victimId]['x2']) {
+                if (!room.activeEffects[p.id]) room.activeEffects[p.id] = {};
+                room.activeEffects[p.id]['x2'] = (room.activeEffects[p.id]['x2'] || 0) + room.activeEffects[victimId]['x2'];
+                delete room.activeEffects[victimId];
             }
-        }
-        else if (type === 'flash' && room.state === 'ANSWERING' && socket.id !== room.turnPlayer) {
-            modifyTimer(room, -5); success = true;
-        }
-        else if (type === 'slow' && isMyTurn) {
-            modifyTimer(room, 5); success = true;
-        }
-        else if (type === 'x2' && isMyTurn) {
-            if (!room.activeEffects[socket.id]) room.activeEffects[socket.id] = {};
-            room.activeEffects[socket.id]['x2'] = (room.activeEffects[socket.id]['x2'] || 0) + 1;
+            room.state = 'STEALING'; room.stealer = p.id; room.processingResult = false; 
+            io.to(roomCode).emit('steal_locked', { stealerName: p.name + " (TƯỚNG CƯỚP)" });
+            const realIndex = room.currentQIndex % room.questions.length;
+            const q = room.questions[realIndex];
+            io.to(p.id).emit('allow_steal_answer', { duration: 5, question: q.text, options: q.answers });
+            startRoomTimer(room, 5, () => {
+                 p.score -= 5;
+                 io.to(roomCode).emit('answer_result', { correct: false, msg: `Cướp thất bại!` });
+                 endTurn(roomCode);
+            });
             success = true;
-        }
-        else if (type === 'shield' && isMyTurn) {
+        } else if (type === 'flash' && room.state === 'ANSWERING' && socket.id !== room.turnPlayer) {
+            modifyTimer(room, -5); success = true;
+        } else if (type === 'slow' && isMyTurn) {
+            modifyTimer(room, 5); success = true;
+        } else if ((type === 'x2' || type === 'shield') && isMyTurn) {
             if (!room.activeEffects[socket.id]) room.activeEffects[socket.id] = {};
-            room.activeEffects[socket.id]['shield'] = true;
+            room.activeEffects[socket.id][type] = (room.activeEffects[socket.id][type] || 0) + 1;
             success = true;
         }
 
@@ -444,7 +453,6 @@ io.on('connection', (socket) => {
         if(rooms[roomCode]) { rooms[roomCode].questions = questions; rooms[roomCode].currentQIndex = 0; }
     });
 
-    // 5. DISCONNECT & CLEANUP
     socket.on('disconnect', () => {
         console.log('Mất kết nối:', socket.id);
         for (const roomCode in rooms) {
@@ -458,7 +466,7 @@ io.on('connection', (socket) => {
                         io.to(roomCode).emit('error_msg', 'Host đã thoát. Phòng giải tán!');
                         delete rooms[roomCode];
                     }
-                }, 120000); // 120s
+                }, 120000);
                 return;
             }
 
@@ -471,12 +479,4 @@ io.on('connection', (socket) => {
                         const idx = room.players.indexOf(player);
                         if (idx !== -1) room.players.splice(idx, 1);
                         io.to(room.host).emit('update_players', room.players.filter(p => !p.disconnected));
-                    }
-                }, 60000); // 60s
-            }
-        }
-    });
-});
-
-const PORT = process.env.PORT || 3000;
-http.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+       
