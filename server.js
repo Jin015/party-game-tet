@@ -3,7 +3,7 @@ const app = express();
 const http = require('http').createServer(app);
 const io = require('socket.io')(http);
 
-console.log("--- SERVER DANG KHOI DONG ---");
+console.log("--- SERVER DANG KHOI DONG (FINAL VERSION) ---");
 
 app.use(express.static('public'));
 
@@ -26,19 +26,18 @@ const DEFAULT_QUESTIONS = [
 
 let rooms = {};
 
-// --- HÀM ĐỒNG BỘ TRẠNG THÁI (FIX LỖI MÀN HÌNH ĐEN) ---
+// --- HÀM ĐỒNG BỘ TRẠNG THÁI ---
 function syncGameState(socket, room, isHost) {
+    if (!room) return; // [SAFETY CHECK]
     const activePlayers = room.players.filter(p => !p.disconnected);
     socket.emit('update_players', activePlayers);
     socket.emit('update_scores', activePlayers);
 
-    // Nếu Host vào lại sảnh chờ -> Mở khóa nút
     if (isHost && room.state === 'WAITING' && !room.isGivingPowerup) {
         socket.emit('lock_spin_btn', { locked: false });
         socket.emit('ready_next_spin');
     }
 
-    // Nếu đang chơi dở -> Gửi lại câu hỏi/thời gian
     if (room.state === 'ANSWERING' || room.state === 'STEALING') {
         const realIndex = room.currentQIndex % room.questions.length;
         const q = room.questions[realIndex];
@@ -69,14 +68,19 @@ function syncGameState(socket, room, isHost) {
 
 // --- CÁC HÀM HỖ TRỢ GAME ---
 function startRoomTimer(room, duration, cb) {
+    if (!room) return; // [SAFETY CHECK]
     if (room.timer) clearTimeout(room.timer);
     room.timerDuration = duration;
     room.timerStart = Date.now();
-    room.timer = setTimeout(cb, duration * 1000);
+    // [QUAN TRỌNG] Thêm check room tồn tại bên trong callback
+    room.timer = setTimeout(() => {
+        const roomCode = Object.keys(rooms).find(key => rooms[key] === room);
+        if (roomCode && rooms[roomCode]) cb(); 
+    }, duration * 1000);
 }
 
 function modifyTimer(room, seconds) {
-    if (!room.timer) return;
+    if (!room || !room.timer) return;
     clearTimeout(room.timer);
     const elapsed = (Date.now() - room.timerStart) / 1000;
     let remaining = room.timerDuration - elapsed + seconds;
@@ -93,10 +97,12 @@ function handleWrongAnswer(roomCode) {
     const room = rooms[roomCode];
     if (!room) return;
     
-    if (room.activeEffects[room.turnPlayer]) {
+    // Nếu người chơi thoát, activeEffects vẫn có thể truy cập
+    if (room.turnPlayer && room.activeEffects[room.turnPlayer]) {
         room.transferEffects = room.activeEffects[room.turnPlayer];
         room.activeEffects = {}; 
     }
+    
     room.state = 'STEALING';
     room.stealer = null;
     room.processingResult = false; 
@@ -131,6 +137,7 @@ function endTurn(roomCode) {
 }
 
 function startPowerupPhase(room, roomCode) {
+    if (!room) return;
     room.isGivingPowerup = true;
     room.powerupOptions = {};
     io.to(room.host).emit('lock_spin_btn', { locked: true, msg: "Đang chọn trợ giúp..." });
@@ -138,16 +145,22 @@ function startPowerupPhase(room, roomCode) {
 
     const keys = Object.keys(POWERUPS);
     room.players.forEach(p => {
+        if (p.disconnected) return; // Bỏ qua người mất kết nối
         const options = keys.sort(() => 0.5 - Math.random()).slice(0, 3).map(k => ({ id: k, ...POWERUPS[k] }));
         room.powerupOptions[p.id] = options;
         io.to(p.id).emit('offer_powerups', options);
     });
 
     if (room.timer) clearTimeout(room.timer);
+    
+    // [SAFETY] Check room tồn tại khi hết giờ
     room.timer = setTimeout(() => {
+        if (!rooms[roomCode]) return; 
+        
         room.players.forEach(p => {
+            if (p.disconnected) return;
             if (room.powerupOptions[p.id]) {
-                const item = room.powerupOptions[p.id][0];
+                const item = room.powerupOptions[p.id][0]; // Tự chọn cái đầu
                 if (p.powerups.length < 2) {
                     p.powerups.push({ type: item.id, expireRound: room.currentQIndex + 12 });
                     io.to(p.id).emit('update_powerup', p.powerups);
@@ -173,7 +186,7 @@ function handleAnswer(roomCode, answerIndex, isSteal, playerId) {
     const isCorrect = (answerIndex == q.correct);
     const p = room.players.find(x => x.id === playerId);
     
-    if (!p) return;
+    if (!p) return; // [SAFETY CHECK] Người chơi thoát trước khi trả lời xong
 
     const effects = room.activeEffects[playerId] || {};
     const x2Count = effects['x2'] || 0;
@@ -184,6 +197,8 @@ function handleAnswer(roomCode, answerIndex, isSteal, playerId) {
     });
 
     setTimeout(() => {
+        if (!rooms[roomCode]) return; // [SAFETY CHECK] Phòng bị xóa trong lúc chờ 2s
+
         if (isCorrect) {
             let points = isSteal ? 15 : 5;
             if (x2Count > 0) {
@@ -269,7 +284,8 @@ io.on('connection', (socket) => {
         const room = rooms[roomCode];
         if (room) {
             const cleanName = name.trim();
-            let existingPlayer = room.players.find(p => p.name.trim().toLowerCase() === cleanName.toLowerCase());
+            // [FIX] Tìm người chơi an toàn hơn
+            let existingPlayer = room.players.find(p => p.name && p.name.trim().toLowerCase() === cleanName.toLowerCase());
 
             if (existingPlayer) {
                 console.log(`PLAYER RECONNECT: ${name}`);
@@ -394,11 +410,14 @@ io.on('connection', (socket) => {
         if (type === 'bandit' && (room.state === 'ANSWERING' || room.state === 'STEALING') && !isMyTurn) {
             if (room.timer) clearTimeout(room.timer);
             const victimId = room.turnPlayer;
+            
+            // Cướp luôn hiệu ứng của nạn nhân
             if (room.activeEffects[victimId] && room.activeEffects[victimId]['x2']) {
                 if (!room.activeEffects[p.id]) room.activeEffects[p.id] = {};
                 room.activeEffects[p.id]['x2'] = (room.activeEffects[p.id]['x2'] || 0) + room.activeEffects[victimId]['x2'];
                 delete room.activeEffects[victimId];
             }
+            
             room.state = 'STEALING'; room.stealer = p.id; room.processingResult = false; 
             io.to(roomCode).emit('steal_locked', { stealerName: p.name + " (TƯỚNG CƯỚP)" });
             const realIndex = room.currentQIndex % room.questions.length;
@@ -431,7 +450,8 @@ io.on('connection', (socket) => {
         const room = rooms[roomCode];
         if(!room) return;
         const p = room.players.find(x => x.id === socket.id);
-        if (room.powerupOptions[p.id]) {
+        // [SAFETY] Check p tồn tại
+        if (p && room.powerupOptions[p.id]) {
             if (p.powerups.length < 2) {
                 p.powerups.push({ type: powerupId, expireRound: room.currentQIndex + 12 });
                 socket.emit('update_powerup', p.powerups);
@@ -440,14 +460,13 @@ io.on('connection', (socket) => {
         }
     });
 
-    // [FIX BUG RESET VẬT PHẨM]
     socket.on('load_questions', ({ roomCode, questions }) => {
         if(rooms[roomCode]) { 
             const room = rooms[roomCode];
             room.questions = questions; 
             room.currentQIndex = 0; 
             
-            // Tịch thu vật phẩm của tất cả mọi người
+            // RESET TOÀN BỘ VẬT PHẨM
             room.players.forEach(p => {
                 p.powerups = []; 
                 io.to(p.id).emit('update_powerup', []); 
@@ -467,8 +486,10 @@ io.on('connection', (socket) => {
                 console.log(`⚠️ Host phòng ${roomCode} rớt mạng.`);
                 room.hostDisconnected = true;
                 room.hostDisconnectTimer = setTimeout(() => {
+                    // [SAFETY] Check room còn tồn tại không trước khi xóa
                     if (rooms[roomCode] && rooms[roomCode].host === socket.id && room.hostDisconnected) {
                         io.to(roomCode).emit('error_msg', 'Host đã thoát. Phòng giải tán!');
+                        if (room.timer) clearTimeout(room.timer); // Dọn timer
                         delete rooms[roomCode];
                     }
                 }, 120000);
@@ -485,7 +506,6 @@ io.on('connection', (socket) => {
                         if (idx !== -1) room.players.splice(idx, 1);
                         io.to(room.host).emit('update_players', room.players.filter(p => !p.disconnected));
                     }
-
                 }, 60000);
             }
         }
