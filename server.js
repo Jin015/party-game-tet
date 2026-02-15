@@ -3,7 +3,7 @@ const app = express();
 const http = require('http').createServer(app);
 const io = require('socket.io')(http);
 
-console.log("--- SERVER DANG KHOI DONG (FINAL VERSION) ---");
+console.log("--- SERVER DANG KHOI DONG (FIXED POWERUP COUNTDOWN) ---");
 
 app.use(express.static('public'));
 
@@ -26,9 +26,27 @@ const DEFAULT_QUESTIONS = [
 
 let rooms = {};
 
+// --- HÀM GỬI VẬT PHẨM (FIX LỖI HIỂN THỊ) ---
+// Hàm này sẽ tính toán "Thời gian còn lại" thay vì gửi "Ngày hết hạn"
+function sendPowerupUpdate(socketId, roomCode) {
+    const room = rooms[roomCode];
+    if (!room) return;
+    
+    const p = room.players.find(x => x.id === socketId);
+    if (!p) return;
+
+    // Tính toán số lượt còn lại để gửi xuống Client
+    const viewData = p.powerups.map(item => ({
+        ...item,
+        expireRound: item.expireRound - room.currentQIndex // VD: Hết hạn vòng 17 - Hiện tại 5 = Còn 12
+    }));
+
+    io.to(socketId).emit('update_powerup', viewData);
+}
+
 // --- HÀM ĐỒNG BỘ TRẠNG THÁI ---
 function syncGameState(socket, room, isHost) {
-    if (!room) return; // [SAFETY CHECK]
+    if (!room) return;
     const activePlayers = room.players.filter(p => !p.disconnected);
     socket.emit('update_players', activePlayers);
     socket.emit('update_scores', activePlayers);
@@ -68,11 +86,10 @@ function syncGameState(socket, room, isHost) {
 
 // --- CÁC HÀM HỖ TRỢ GAME ---
 function startRoomTimer(room, duration, cb) {
-    if (!room) return; // [SAFETY CHECK]
+    if (!room) return;
     if (room.timer) clearTimeout(room.timer);
     room.timerDuration = duration;
     room.timerStart = Date.now();
-    // [QUAN TRỌNG] Thêm check room tồn tại bên trong callback
     room.timer = setTimeout(() => {
         const roomCode = Object.keys(rooms).find(key => rooms[key] === room);
         if (roomCode && rooms[roomCode]) cb(); 
@@ -97,7 +114,6 @@ function handleWrongAnswer(roomCode) {
     const room = rooms[roomCode];
     if (!room) return;
     
-    // Nếu người chơi thoát, activeEffects vẫn có thể truy cập
     if (room.turnPlayer && room.activeEffects[room.turnPlayer]) {
         room.transferEffects = room.activeEffects[room.turnPlayer];
         room.activeEffects = {}; 
@@ -145,7 +161,7 @@ function startPowerupPhase(room, roomCode) {
 
     const keys = Object.keys(POWERUPS);
     room.players.forEach(p => {
-        if (p.disconnected) return; // Bỏ qua người mất kết nối
+        if (p.disconnected) return;
         const options = keys.sort(() => 0.5 - Math.random()).slice(0, 3).map(k => ({ id: k, ...POWERUPS[k] }));
         room.powerupOptions[p.id] = options;
         io.to(p.id).emit('offer_powerups', options);
@@ -153,17 +169,17 @@ function startPowerupPhase(room, roomCode) {
 
     if (room.timer) clearTimeout(room.timer);
     
-    // [SAFETY] Check room tồn tại khi hết giờ
     room.timer = setTimeout(() => {
         if (!rooms[roomCode]) return; 
         
         room.players.forEach(p => {
             if (p.disconnected) return;
             if (room.powerupOptions[p.id]) {
-                const item = room.powerupOptions[p.id][0]; // Tự chọn cái đầu
+                const item = room.powerupOptions[p.id][0];
                 if (p.powerups.length < 2) {
                     p.powerups.push({ type: item.id, expireRound: room.currentQIndex + 12 });
-                    io.to(p.id).emit('update_powerup', p.powerups);
+                    // Gửi cập nhật (sẽ tự tính toán lại số hiển thị là 12)
+                    sendPowerupUpdate(p.id, roomCode);
                 }
                 io.to(p.id).emit('powerup_modal_close');
             }
@@ -186,7 +202,7 @@ function handleAnswer(roomCode, answerIndex, isSteal, playerId) {
     const isCorrect = (answerIndex == q.correct);
     const p = room.players.find(x => x.id === playerId);
     
-    if (!p) return; // [SAFETY CHECK] Người chơi thoát trước khi trả lời xong
+    if (!p) return; 
 
     const effects = room.activeEffects[playerId] || {};
     const x2Count = effects['x2'] || 0;
@@ -197,7 +213,7 @@ function handleAnswer(roomCode, answerIndex, isSteal, playerId) {
     });
 
     setTimeout(() => {
-        if (!rooms[roomCode]) return; // [SAFETY CHECK] Phòng bị xóa trong lúc chờ 2s
+        if (!rooms[roomCode]) return; 
 
         if (isCorrect) {
             let points = isSteal ? 15 : 5;
@@ -284,7 +300,6 @@ io.on('connection', (socket) => {
         const room = rooms[roomCode];
         if (room) {
             const cleanName = name.trim();
-            // [FIX] Tìm người chơi an toàn hơn
             let existingPlayer = room.players.find(p => p.name && p.name.trim().toLowerCase() === cleanName.toLowerCase());
 
             if (existingPlayer) {
@@ -299,7 +314,10 @@ io.on('connection', (socket) => {
 
                 socket.join(roomCode);
                 socket.emit('join_success', { name: existingPlayer.name, score: existingPlayer.score });
-                socket.emit('update_powerup', existingPlayer.powerups);
+                
+                // Gửi lại vật phẩm (đã tính lại thời gian còn lại)
+                sendPowerupUpdate(socket.id, roomCode);
+                
                 syncGameState(socket, room, false);
             } else {
                 room.players.push({ id: socket.id, name, score: 0, powerups: [], disconnected: false });
@@ -328,12 +346,13 @@ io.on('connection', (socket) => {
         const room = rooms[roomCode];
         if (!room) return;
         
+        // Cập nhật vật phẩm cho tất cả người chơi mỗi đầu vòng
         room.players.forEach(p => {
-            const oldLen = p.powerups.length;
+            if(p.disconnected) return;
+            // Xóa cái hết hạn
             p.powerups = p.powerups.filter(item => room.currentQIndex <= item.expireRound);
-            if (p.powerups.length < oldLen) {
-                io.to(p.id).emit('update_powerup', p.powerups);
-            }
+            // Gửi cập nhật số đếm ngược (VD: 12, 11, 10...)
+            sendPowerupUpdate(p.id, roomCode);
         });
 
         if (room.questions.length === 0) return;
@@ -411,7 +430,6 @@ io.on('connection', (socket) => {
             if (room.timer) clearTimeout(room.timer);
             const victimId = room.turnPlayer;
             
-            // Cướp luôn hiệu ứng của nạn nhân
             if (room.activeEffects[victimId] && room.activeEffects[victimId]['x2']) {
                 if (!room.activeEffects[p.id]) room.activeEffects[p.id] = {};
                 room.activeEffects[p.id]['x2'] = (room.activeEffects[p.id]['x2'] || 0) + room.activeEffects[victimId]['x2'];
@@ -441,7 +459,8 @@ io.on('connection', (socket) => {
 
         if (success) {
             p.powerups.splice(index, 1);
-            socket.emit('update_powerup', p.powerups);
+            // Gửi cập nhật vật phẩm (đã mất 1 cái)
+            sendPowerupUpdate(p.id, roomCode);
             io.to(roomCode).emit('notification', { type: 'warning', msg: `${p.name} dùng ${POWERUPS[type].name}!` });
         }
     });
@@ -450,11 +469,11 @@ io.on('connection', (socket) => {
         const room = rooms[roomCode];
         if(!room) return;
         const p = room.players.find(x => x.id === socket.id);
-        // [SAFETY] Check p tồn tại
         if (p && room.powerupOptions[p.id]) {
             if (p.powerups.length < 2) {
                 p.powerups.push({ type: powerupId, expireRound: room.currentQIndex + 12 });
-                socket.emit('update_powerup', p.powerups);
+                // Gửi cập nhật (sẽ hiển thị là 12)
+                sendPowerupUpdate(p.id, roomCode);
             }
             delete room.powerupOptions[p.id];
         }
@@ -486,10 +505,9 @@ io.on('connection', (socket) => {
                 console.log(`⚠️ Host phòng ${roomCode} rớt mạng.`);
                 room.hostDisconnected = true;
                 room.hostDisconnectTimer = setTimeout(() => {
-                    // [SAFETY] Check room còn tồn tại không trước khi xóa
                     if (rooms[roomCode] && rooms[roomCode].host === socket.id && room.hostDisconnected) {
                         io.to(roomCode).emit('error_msg', 'Host đã thoát. Phòng giải tán!');
-                        if (room.timer) clearTimeout(room.timer); // Dọn timer
+                        if (room.timer) clearTimeout(room.timer); 
                         delete rooms[roomCode];
                     }
                 }, 120000);
