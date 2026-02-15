@@ -32,11 +32,13 @@ function syncGameState(socket, room, isHost) {
     socket.emit('update_players', activePlayers);
     socket.emit('update_scores', activePlayers);
 
+    // Nếu Host vào lại sảnh chờ -> Mở khóa nút
     if (isHost && room.state === 'WAITING' && !room.isGivingPowerup) {
         socket.emit('lock_spin_btn', { locked: false });
         socket.emit('ready_next_spin');
     }
 
+    // Nếu đang chơi dở -> Gửi lại câu hỏi/thời gian
     if (room.state === 'ANSWERING' || room.state === 'STEALING') {
         const realIndex = room.currentQIndex % room.questions.length;
         const q = room.questions[realIndex];
@@ -438,8 +440,22 @@ io.on('connection', (socket) => {
         }
     });
 
+    // [FIX BUG RESET VẬT PHẨM]
     socket.on('load_questions', ({ roomCode, questions }) => {
-        if(rooms[roomCode]) { rooms[roomCode].questions = questions; rooms[roomCode].currentQIndex = 0; }
+        if(rooms[roomCode]) { 
+            const room = rooms[roomCode];
+            room.questions = questions; 
+            room.currentQIndex = 0; 
+            
+            // Tịch thu vật phẩm của tất cả mọi người
+            room.players.forEach(p => {
+                p.powerups = []; 
+                io.to(p.id).emit('update_powerup', []); 
+            });
+            
+            io.to(roomCode).emit('notification', { type: 'success', msg: 'Đã nạp câu hỏi mới & Reset vật phẩm!' });
+            io.to(roomCode).emit('reset_round'); 
+        }
     });
 
     socket.on('disconnect', () => {
@@ -469,11 +485,4 @@ io.on('connection', (socket) => {
                         if (idx !== -1) room.players.splice(idx, 1);
                         io.to(room.host).emit('update_players', room.players.filter(p => !p.disconnected));
                     }
-                }, 60000);
-            }
-        }
-    });
-});
-
-const PORT = process.env.PORT || 3000;
-http.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+                }, 600
