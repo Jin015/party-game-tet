@@ -485,4 +485,12 @@ io.on('connection', (socket) => {
                         if (idx !== -1) room.players.splice(idx, 1);
                         io.to(room.host).emit('update_players', room.players.filter(p => !p.disconnected));
                     }
-                }, 600
+
+                }, 60000);
+            }
+        }
+    });
+});
+
+const PORT = process.env.PORT || 3000;
+http.listen(PORT, () => console.log(`Server running on port ${PORT}`));
