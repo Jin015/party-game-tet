@@ -3,14 +3,14 @@ const app = express();
 const http = require('http').createServer(app);
 const io = require('socket.io')(http);
 
-console.log("--- SERVER DANG KHOI DONG (FIX DOUBLE ITEM) ---");
+console.log("--- SERVER DANG KHOI DONG (BALANCE UPDATE) ---");
 
 app.use(express.static('public'));
 
 // --- CẤU HÌNH ---
 const POWERUPS = {
     'x2': { name: 'Nhân Đôi', desc: 'x2 Điểm (Đúng +20, Cướp +30/-10)' },
-    'shield': { name: 'Khiên Bảo Vệ', desc: 'Miễn trừ điểm phạt khi cướp sai' },
+    'shield': { name: 'Khiên Bảo Vệ', desc: 'Chặn Tướng Cướp & Miễn trừ điểm phạt' }, // Cập nhật mô tả
     'slow': { name: 'Đồng Hồ Cát', desc: '+5s thời gian trả lời' },
     'flash': { name: 'Tốc Biến', desc: '-5s thời gian của đối thủ' },
     'bandit': { name: 'Tướng Cướp', desc: 'Cướp lượt ngay lập tức!' }
@@ -26,7 +26,7 @@ const DEFAULT_QUESTIONS = [
 
 let rooms = {};
 
-// --- HÀM GỬI VẬT PHẨM (TÍNH THỜI GIAN CÒN LẠI) ---
+// --- HÀM GỬI VẬT PHẨM ---
 function sendPowerupUpdate(socketId, roomCode) {
     const room = rooms[roomCode];
     if (!room) return;
@@ -34,7 +34,6 @@ function sendPowerupUpdate(socketId, roomCode) {
     const p = room.players.find(x => x.id === socketId);
     if (!p) return;
 
-    // Tính toán số lượt còn lại (Expire - Current)
     const viewData = p.powerups.map(item => ({
         ...item,
         expireRound: item.expireRound - room.currentQIndex 
@@ -171,11 +170,10 @@ function startPowerupPhase(room, roomCode) {
     room.timer = setTimeout(() => {
         if (!rooms[roomCode]) return; 
         
-        room.isGivingPowerup = false; // [FIX 1] Đóng cửa ngay lập tức
+        room.isGivingPowerup = false; 
         
         room.players.forEach(p => {
             if (p.disconnected) return;
-            // Chỉ tặng nếu người chơi CHƯA chọn (vẫn còn options)
             if (room.powerupOptions[p.id]) {
                 const item = room.powerupOptions[p.id][0];
                 if (p.powerups.length < 2) {
@@ -183,8 +181,7 @@ function startPowerupPhase(room, roomCode) {
                     sendPowerupUpdate(p.id, roomCode);
                 }
                 io.to(p.id).emit('powerup_modal_close');
-                
-                delete room.powerupOptions[p.id]; // [FIX 2] Xóa ngay để tránh chọn lại
+                delete room.powerupOptions[p.id]; 
             }
         });
 
@@ -426,9 +423,17 @@ io.on('connection', (socket) => {
                          (room.state === 'STEALING' && socket.id === room.stealer);
         let success = false;
         
+        // --- LOGIC BANDIT & KHIÊN ---
         if (type === 'bandit' && (room.state === 'ANSWERING' || room.state === 'STEALING') && !isMyTurn) {
-            if (room.timer) clearTimeout(room.timer);
+            
+            // [CHECK KHIÊN]
             const victimId = room.turnPlayer;
+            if (room.activeEffects[victimId] && room.activeEffects[victimId]['shield']) {
+                socket.emit('notification', { type: 'error', msg: 'Đối thủ đang bật Khiên! Không thể cướp!' });
+                return; // Dừng ngay, không trừ thẻ
+            }
+
+            if (room.timer) clearTimeout(room.timer);
             
             if (room.activeEffects[victimId] && room.activeEffects[victimId]['x2']) {
                 if (!room.activeEffects[p.id]) room.activeEffects[p.id] = {};
@@ -468,7 +473,6 @@ io.on('connection', (socket) => {
         const room = rooms[roomCode];
         if(!room) return;
         
-        // [FIX 3] Kiểm tra xem còn trong thời gian chọn không
         if (!room.isGivingPowerup) return; 
 
         const p = room.players.find(x => x.id === socket.id);
@@ -477,7 +481,7 @@ io.on('connection', (socket) => {
                 p.powerups.push({ type: powerupId, expireRound: room.currentQIndex + 12 });
                 sendPowerupUpdate(p.id, roomCode);
             }
-            delete room.powerupOptions[p.id]; // Xóa ngay sau khi chọn
+            delete room.powerupOptions[p.id]; 
         }
     });
 
